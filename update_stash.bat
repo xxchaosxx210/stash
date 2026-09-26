@@ -39,7 +39,7 @@ for %%A in ("%TEMP%\stash_git_status.txt") do if %%~zA GTR 0 (
 del "%TEMP%\stash_git_status.txt" >nul 2>nul
 
 set "TARGET_BRANCH=%~1"
-if "%TARGET_BRANCH%"=="" set "TARGET_BRANCH=move-workflow"
+if "%TARGET_BRANCH%"=="" set "TARGET_BRANCH=main"
 
 echo Working branch: "%TARGET_BRANCH%"
 echo.
