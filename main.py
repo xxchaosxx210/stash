@@ -22,8 +22,8 @@ class StashApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Stash")
-        self.geometry("820x620")
-        self.minsize(720, 520)
+        self.geometry("640x470")
+        self.minsize(580, 430)
 
         self.root_path = tk.StringVar()
         self.threshold = tk.IntVar(value=10)
@@ -48,7 +48,7 @@ class StashApp(tk.Tk):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(3, weight=1)
 
-        header = ttk.Frame(self, padding=(14, 12, 14, 6))
+        header = ttk.Frame(self, padding=(10, 8, 10, 4))
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
 
@@ -57,10 +57,10 @@ class StashApp(tk.Tk):
         )
         ttk.Label(
             header,
-            text="Scan, review the plan, confirm, then copy matching images",
+            text="Scan, confirm, then copy matching images",
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
-        controls = ttk.LabelFrame(self, text="Stash settings", padding=12)
+        controls = ttk.LabelFrame(self, text="Stash settings", padding=8)
         controls.grid(row=1, column=0, sticky="ew", padx=14, pady=(4, 8))
         controls.columnconfigure(1, weight=1)
 
@@ -140,7 +140,7 @@ class StashApp(tk.Tk):
 
         ttk.Checkbutton(
             controls,
-            text="Delete source folders after successful copy (safe folders only)",
+            text="Delete safe source folders after successful copy",
             variable=self.delete_sources,
         ).grid(
             row=4,
@@ -150,7 +150,7 @@ class StashApp(tk.Tk):
             pady=(10, 0),
         )
 
-        buttons = ttk.Frame(self, padding=(14, 0, 14, 8))
+        buttons = ttk.Frame(self, padding=(10, 0, 10, 6))
         buttons.grid(row=2, column=0, sticky="ew")
         buttons.columnconfigure(5, weight=1)
 
@@ -181,7 +181,7 @@ class StashApp(tk.Tk):
         )
 
         log_frame = ttk.LabelFrame(self, text="Activity log", padding=8)
-        log_frame.grid(row=3, column=0, sticky="nsew", padx=14, pady=(0, 10))
+        log_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 8))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
 
@@ -194,7 +194,7 @@ class StashApp(tk.Tk):
         self.log.grid(row=0, column=0, sticky="nsew")
         self.log.configure(state="disabled")
 
-        status = ttk.Frame(self, padding=(14, 0, 14, 10))
+        status = ttk.Frame(self, padding=(10, 0, 10, 8))
         status.grid(row=4, column=0, sticky="ew")
         status.columnconfigure(0, weight=1)
 
