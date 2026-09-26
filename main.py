@@ -12,6 +12,7 @@ from scanner import (
     FolderPreview,
     FolderScan,
     ScanSummary,
+    sanitize_output_prefix,
     scan_and_preview,
 )
 
@@ -20,12 +21,14 @@ class StashApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Stash")
-        self.geometry("980x700")
-        self.minsize(800, 540)
+        self.geometry("1000x750")
+        self.minsize(820, 590)
 
         self.root_path = tk.StringVar()
         self.threshold = tk.IntVar(value=10)
         self.batch_size = tk.IntVar(value=500)
+        self.output_mode = tk.StringVar(value="root")
+        self.custom_output_prefix = tk.StringVar(value="Miscellaneous")
         self.status_text = tk.StringVar(value="Ready")
         self.summary_text = tk.StringVar(value="No scan run yet")
 
@@ -79,7 +82,7 @@ class StashApp(tk.Tk):
             row=1, column=1, sticky="w", padx=(62, 0), pady=(10, 0)
         )
 
-        ttk.Label(controls, text="Miscellaneous target:").grid(
+        ttk.Label(controls, text="Output target:").grid(
             row=2, column=0, sticky="w", pady=(8, 0), padx=(0, 8)
         )
         ttk.Spinbox(
@@ -92,6 +95,48 @@ class StashApp(tk.Tk):
         ttk.Label(controls, text="images (source folders stay together)").grid(
             row=2, column=1, sticky="w", padx=(62, 0), pady=(8, 0)
         )
+
+        ttk.Label(controls, text="Output folder name:").grid(
+            row=3, column=0, sticky="nw", pady=(10, 0), padx=(0, 8)
+        )
+
+        naming = ttk.Frame(controls)
+        naming.grid(row=3, column=1, columnspan=2, sticky="ew", pady=(8, 0))
+        naming.columnconfigure(1, weight=1)
+
+        ttk.Radiobutton(
+            naming,
+            text="Root folder name + _Misc",
+            variable=self.output_mode,
+            value="root",
+            command=self._update_output_controls,
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        ttk.Radiobutton(
+            naming,
+            text="Custom:",
+            variable=self.output_mode,
+            value="custom",
+            command=self._update_output_controls,
+        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
+
+        self.custom_output_entry = ttk.Entry(
+            naming,
+            textvariable=self.custom_output_prefix,
+        )
+        self.custom_output_entry.grid(
+            row=1, column=1, sticky="ew", padx=(8, 0), pady=(5, 0)
+        )
+
+        self.output_example = ttk.Label(naming, text="")
+        self.output_example.grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(5, 0)
+        )
+
+        self.root_path.trace_add("write", self._refresh_output_example)
+        self.custom_output_prefix.trace_add("write", self._refresh_output_example)
+        self.output_mode.trace_add("write", self._refresh_output_example)
+        self._update_output_controls()
 
         buttons = ttk.Frame(self, padding=(14, 0, 14, 8))
         buttons.grid(row=2, column=0, sticky="ew")
@@ -146,6 +191,36 @@ class StashApp(tk.Tk):
         if selected:
             self.root_path.set(selected)
 
+    def _update_output_controls(self) -> None:
+        if self.output_mode.get() == "custom":
+            self.custom_output_entry.configure(state="normal")
+        else:
+            self.custom_output_entry.configure(state="disabled")
+        self._refresh_output_example()
+
+    def _refresh_output_example(self, *_args: object) -> None:
+        raw_root = self.root_path.get().strip()
+        root = Path(raw_root) if raw_root else None
+
+        if self.output_mode.get() == "root":
+            base = root.name if root and root.name else "Root"
+            prefix = sanitize_output_prefix(f"{base}_Misc")
+        else:
+            prefix = sanitize_output_prefix(self.custom_output_prefix.get())
+
+        self.output_example.configure(
+            text=f"Example: {prefix}_001, {prefix}_002, …"
+        )
+
+    def _resolve_output_prefix(self, root: Path) -> str:
+        if self.output_mode.get() == "root":
+            return sanitize_output_prefix(f"{root.name}_Misc")
+
+        raw = self.custom_output_prefix.get().strip()
+        if not raw:
+            raise ValueError("Enter a custom output folder name.")
+        return sanitize_output_prefix(raw)
+
     def _start_scan(self) -> None:
         if self._scan_thread and self._scan_thread.is_alive():
             return
@@ -163,12 +238,13 @@ class StashApp(tk.Tk):
         try:
             threshold = int(self.threshold.get())
             batch_size = int(self.batch_size.get())
-        except (tk.TclError, ValueError):
-            messagebox.showerror("Stash", "Enter valid numeric settings.")
+            output_prefix = self._resolve_output_prefix(root)
+        except (tk.TclError, ValueError) as exc:
+            messagebox.showerror("Stash", str(exc) or "Enter valid settings.")
             return
 
         if threshold < 1 or batch_size < 1:
-            messagebox.showerror("Stash", "Both settings must be at least 1.")
+            messagebox.showerror("Stash", "Both numeric settings must be at least 1.")
             return
 
         self._clear_log()
@@ -181,24 +257,31 @@ class StashApp(tk.Tk):
         self._append_log("STASH — READ-ONLY CONSOLIDATION PREVIEW")
         self._append_log(f"Root: {root}")
         self._append_log(f"Match rule: folders containing 1 to {threshold} images")
-        self._append_log(f"Miscellaneous target: {batch_size} images")
+        self._append_log(f"Output target: {batch_size} images")
+        self._append_log(f"Output folder prefix: {output_prefix}")
         self._append_log(
-            "Rule: an original source folder is never split between Miscellaneous folders."
+            "Rule: an original source folder is never split between output folders."
         )
         self._append_log(
-            "Existing Miscellaneous_NNN folders are excluded from source scanning."
+            f"Existing {output_prefix}_NNN folders are excluded from source scanning."
         )
         self._append_log("PREVIEW ONLY — no files or folders will be changed.")
         self._append_log("-" * 84)
 
         self._scan_thread = threading.Thread(
             target=self._scan_worker,
-            args=(root, threshold, batch_size),
+            args=(root, threshold, batch_size, output_prefix),
             daemon=True,
         )
         self._scan_thread.start()
 
-    def _scan_worker(self, root: Path, threshold: int, batch_size: int) -> None:
+    def _scan_worker(
+        self,
+        root: Path,
+        threshold: int,
+        batch_size: int,
+        output_prefix: str,
+    ) -> None:
         def report_existing(state: ExistingOutputState) -> None:
             self._messages.put(("existing", state))
 
@@ -214,6 +297,7 @@ class StashApp(tk.Tk):
                 root=root,
                 threshold=threshold,
                 batch_size=batch_size,
+                output_prefix=output_prefix,
                 on_existing_output=report_existing,
                 on_folder=report_folder,
                 stop_event=self._stop_event,
@@ -252,12 +336,14 @@ class StashApp(tk.Tk):
 
     def _show_existing_output(self, state: ExistingOutputState) -> None:
         if state.folder_count == 0:
-            self._append_log("Existing Stash output: none found")
+            self._append_log(
+                f"Existing {state.output_prefix} output: none found"
+            )
             self._append_log("Next global sequence: 000001")
         else:
-            latest_name = f"Miscellaneous_{state.latest_index:03d}"
+            latest_name = f"{state.output_prefix}_{state.latest_index:03d}"
             self._append_log(
-                f"Existing Stash output: {state.folder_count} folder(s), "
+                f"Existing {state.output_prefix} output: {state.folder_count} folder(s), "
                 f"{state.image_count} image(s)"
             )
             self._append_log(
