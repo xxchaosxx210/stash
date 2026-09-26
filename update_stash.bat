@@ -39,12 +39,10 @@ for %%A in ("%TEMP%\stash_git_status.txt") do if %%~zA GTR 0 (
 del "%TEMP%\stash_git_status.txt" >nul 2>nul
 
 set "TARGET_BRANCH=%~1"
-if "%TARGET_BRANCH%"=="" (
-    for /f "delims=" %%B in ('git branch --show-current') do set "TARGET_BRANCH=%%B"
-)
+if "%TARGET_BRANCH%"=="" set "TARGET_BRANCH=move-workflow"
 
-if "%TARGET_BRANCH%"=="" set "TARGET_BRANCH=main"
-
+echo Working branch: "%TARGET_BRANCH%"
+echo.
 echo Fetching branches from GitHub...
 git fetch origin --prune
 if errorlevel 1 goto :update_failed
