@@ -364,35 +364,25 @@ class StashApp(tk.Tk):
 
         if delete_requested:
             cleanup_text = (
-                f"
-Source-folder deletion is ON.
-"
+                f"\nSource-folder deletion is ON.\n"
                 f"{deletable} source folder(s) are currently safe to delete after "
                 f"verified copying."
             )
             if protected:
                 cleanup_text += (
-                    f"
-{protected} source folder(s) contain extra content and will "
+                    f"\n{protected} source folder(s) contain extra content and will "
                     "be left untouched."
                 )
         else:
-            cleanup_text = "
-Source-folder deletion is OFF. Originals will remain."
+            cleanup_text = "\nSource-folder deletion is OFF. Originals will remain."
 
         confirmed = messagebox.askyesno(
             "Stash — Confirm",
-            f"Scan complete.
-
-"
-            f"{summary.qualifying_folders} matching folder(s)
-"
-            f"{files_to_copy} image(s) will be copied
-"
+            f"Scan complete.\n\n"
+            f"{summary.qualifying_folders} matching folder(s)\n"
+            f"{files_to_copy} image(s) will be copied\n"
             f"{len(output_folders)} output folder(s) will be used"
-            f"{cleanup_text}
-
-"
+            f"{cleanup_text}\n\n"
             "Continue?",
         )
 
@@ -528,7 +518,7 @@ Source-folder deletion is OFF. Originals will remain."
                 f"        {item.source_sequence:>3}. {item.source_name}"
             )
             self._append_log(
-                f"             -> {item.destination_folder}\{item.destination_name}"
+                f"             -> {item.destination_folder}\\{item.destination_name}"
             )
 
     def _show_scan_summary(self, summary: ScanSummary) -> None:
@@ -650,8 +640,7 @@ Source-folder deletion is OFF. Originals will remain."
 
     def _append_log(self, text: str) -> None:
         self.log.configure(state="normal")
-        self.log.insert("end", text + "
-")
+        self.log.insert("end", text + "\n")
         self.log.see("end")
         self.log.configure(state="disabled")
 
