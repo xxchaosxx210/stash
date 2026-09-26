@@ -22,8 +22,8 @@ class StashApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Stash")
-        self.geometry("1020x770")
-        self.minsize(840, 610)
+        self.geometry("820x620")
+        self.minsize(720, 520)
 
         self.root_path = tk.StringVar()
         self.threshold = tk.IntVar(value=10)
@@ -364,25 +364,35 @@ class StashApp(tk.Tk):
 
         if delete_requested:
             cleanup_text = (
-                f"\nSource-folder deletion is ON.\n"
+                f"
+Source-folder deletion is ON.
+"
                 f"{deletable} source folder(s) are currently safe to delete after "
                 f"verified copying."
             )
             if protected:
                 cleanup_text += (
-                    f"\n{protected} source folder(s) contain extra content and will "
+                    f"
+{protected} source folder(s) contain extra content and will "
                     "be left untouched."
                 )
         else:
-            cleanup_text = "\nSource-folder deletion is OFF. Originals will remain."
+            cleanup_text = "
+Source-folder deletion is OFF. Originals will remain."
 
         confirmed = messagebox.askyesno(
             "Stash — Confirm",
-            f"Scan complete.\n\n"
-            f"{summary.qualifying_folders} matching folder(s)\n"
-            f"{files_to_copy} image(s) will be copied\n"
+            f"Scan complete.
+
+"
+            f"{summary.qualifying_folders} matching folder(s)
+"
+            f"{files_to_copy} image(s) will be copied
+"
             f"{len(output_folders)} output folder(s) will be used"
-            f"{cleanup_text}\n\n"
+            f"{cleanup_text}
+
+"
             "Continue?",
         )
 
@@ -518,7 +528,7 @@ class StashApp(tk.Tk):
                 f"        {item.source_sequence:>3}. {item.source_name}"
             )
             self._append_log(
-                f"             -> {item.destination_folder}\\{item.destination_name}"
+                f"             -> {item.destination_folder}\{item.destination_name}"
             )
 
     def _show_scan_summary(self, summary: ScanSummary) -> None:
@@ -640,7 +650,8 @@ class StashApp(tk.Tk):
 
     def _append_log(self, text: str) -> None:
         self.log.configure(state="normal")
-        self.log.insert("end", text + "\n")
+        self.log.insert("end", text + "
+")
         self.log.see("end")
         self.log.configure(state="disabled")
 
