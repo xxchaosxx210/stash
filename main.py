@@ -490,6 +490,17 @@ class StashApp(tk.Tk):
                 f"Next global sequence: {state.highest_sequence + 1:06d}"
             )
 
+            if state.integrity_warnings:
+                self._append_log("Output integrity: WARNING")
+                for warning in state.integrity_warnings:
+                    self._append_log(f"  - {warning}")
+                self._append_log(
+                    "Integrity warnings are informational only; Stash will not "
+                    "renumber or repair existing output automatically."
+                )
+            else:
+                self._append_log("Output integrity: OK")
+
         self._append_log("-" * 84)
 
     def _show_folder(
