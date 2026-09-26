@@ -50,6 +50,7 @@ class ExistingOutputState:
     latest_image_count: int
     highest_sequence: int
     output_prefix: str
+    integrity_warnings: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -123,7 +124,7 @@ def output_folder_name(output_prefix: str, index: int) -> str:
 
 
 def inspect_existing_output(root: Path, output_prefix: str) -> ExistingOutputState:
-    """Read existing output folders for the selected prefix without changing them."""
+    """Read and lightly validate existing Stash output without changing it."""
     output_folders: list[tuple[int, Path]] = []
 
     for child in root.iterdir():
@@ -139,29 +140,87 @@ def inspect_existing_output(root: Path, output_prefix: str) -> ExistingOutputSta
     highest_sequence = 0
     latest_index = 0
     latest_image_count = 0
+    sequence_counts: dict[int, int] = {}
+    unrecognized_images: list[str] = []
+    warnings: list[str] = []
+
+    folder_indices = [index for index, _folder in output_folders]
+    if folder_indices:
+        missing_folder_indices = [
+            index
+            for index in range(1, max(folder_indices) + 1)
+            if index not in set(folder_indices)
+        ]
+        if missing_folder_indices:
+            shown = ", ".join(f"{index:03d}" for index in missing_folder_indices[:20])
+            suffix = " ..." if len(missing_folder_indices) > 20 else ""
+            warnings.append(
+                f"Missing output folder number(s): {shown}{suffix}"
+            )
+
+    stash_name_re = re.compile(r"^(\d+)__.+__(\d+)\.[^.]+$", re.IGNORECASE)
 
     for index, folder in output_folders:
         image_count = 0
         try:
             entries = list(folder.iterdir())
-        except OSError:
+        except OSError as exc:
+            warnings.append(f"Could not inspect {folder.name}: {exc}")
             entries = []
 
         for item in entries:
             if not item.is_file():
                 continue
 
-            if item.suffix.casefold() in IMAGE_EXTENSIONS:
-                image_count += 1
-                total_images += 1
+            if item.suffix.casefold() not in IMAGE_EXTENSIONS:
+                continue
+
+            image_count += 1
+            total_images += 1
 
             match = GLOBAL_SEQUENCE_RE.match(item.name)
             if match:
-                highest_sequence = max(highest_sequence, int(match.group(1)))
+                sequence = int(match.group(1))
+                highest_sequence = max(highest_sequence, sequence)
+                sequence_counts[sequence] = sequence_counts.get(sequence, 0) + 1
+
+            if not stash_name_re.fullmatch(item.name):
+                unrecognized_images.append(f"{folder.name}\\{item.name}")
 
         if index >= latest_index:
             latest_index = index
             latest_image_count = image_count
+
+    if sequence_counts:
+        duplicates = sorted(
+            sequence
+            for sequence, count in sequence_counts.items()
+            if count > 1
+        )
+        if duplicates:
+            shown = ", ".join(f"{sequence:06d}" for sequence in duplicates[:20])
+            suffix = " ..." if len(duplicates) > 20 else ""
+            warnings.append(f"Duplicate global sequence(s): {shown}{suffix}")
+
+        sequence_set = set(sequence_counts)
+        missing_sequences = [
+            sequence
+            for sequence in range(1, highest_sequence + 1)
+            if sequence not in sequence_set
+        ]
+        if missing_sequences:
+            shown = ", ".join(
+                f"{sequence:06d}" for sequence in missing_sequences[:20]
+            )
+            suffix = " ..." if len(missing_sequences) > 20 else ""
+            warnings.append(f"Missing global sequence(s): {shown}{suffix}")
+
+    if unrecognized_images:
+        shown = ", ".join(unrecognized_images[:5])
+        suffix = " ..." if len(unrecognized_images) > 5 else ""
+        warnings.append(
+            f"Image filename(s) not in Stash format: {shown}{suffix}"
+        )
 
     return ExistingOutputState(
         folder_count=len(output_folders),
@@ -170,6 +229,7 @@ def inspect_existing_output(root: Path, output_prefix: str) -> ExistingOutputSta
         latest_image_count=latest_image_count,
         highest_sequence=highest_sequence,
         output_prefix=output_prefix,
+        integrity_warnings=tuple(warnings),
     )
 
 
