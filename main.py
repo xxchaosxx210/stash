@@ -7,7 +7,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from processor import build_copy_items, copy_plan
+from processor import CopyGroup, build_copy_groups, process_groups
 from scanner import (
     ExistingOutputState,
     FolderPreview,
@@ -22,25 +22,24 @@ class StashApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Stash")
-        self.geometry("1020x760")
-        self.minsize(840, 600)
+        self.geometry("640x470")
+        self.minsize(580, 430)
 
         self.root_path = tk.StringVar()
         self.threshold = tk.IntVar(value=10)
         self.batch_size = tk.IntVar(value=500)
         self.output_mode = tk.StringVar(value="root")
         self.custom_output_prefix = tk.StringVar(value="Miscellaneous")
+        self.delete_sources = tk.BooleanVar(value=False)
         self.status_text = tk.StringVar(value="Ready")
         self.summary_text = tk.StringVar(value="No scan run yet")
 
         self._messages: queue.Queue[tuple[str, object]] = queue.Queue()
         self._stop_event = threading.Event()
         self._scan_thread: threading.Thread | None = None
-        self._copy_thread: threading.Thread | None = None
-
+        self._process_thread: threading.Thread | None = None
         self._preview_plan: list[tuple[FolderScan, FolderPreview]] = []
-        self._preview_signature: tuple[str, int, int, str] | None = None
-        self._preview_complete = False
+        self._active_root: Path | None = None
 
         self._build_ui()
         self.after(100, self._drain_messages)
@@ -49,7 +48,7 @@ class StashApp(tk.Tk):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(3, weight=1)
 
-        header = ttk.Frame(self, padding=(14, 12, 14, 6))
+        header = ttk.Frame(self, padding=(10, 8, 10, 4))
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
 
@@ -58,10 +57,10 @@ class StashApp(tk.Tk):
         )
         ttk.Label(
             header,
-            text="Preview first, then copy-test while leaving all source files untouched",
+            text="Scan, confirm, then copy matching images",
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
-        controls = ttk.LabelFrame(self, text="Stash settings", padding=12)
+        controls = ttk.LabelFrame(self, text="Stash settings", padding=8)
         controls.grid(row=1, column=0, sticky="ew", padx=14, pady=(4, 8))
         controls.columnconfigure(1, weight=1)
 
@@ -139,41 +138,50 @@ class StashApp(tk.Tk):
             row=2, column=0, columnspan=2, sticky="w", pady=(5, 0)
         )
 
-        buttons = ttk.Frame(self, padding=(14, 0, 14, 8))
+        ttk.Checkbutton(
+            controls,
+            text="Delete safe source folders after successful copy",
+            variable=self.delete_sources,
+        ).grid(
+            row=4,
+            column=1,
+            columnspan=2,
+            sticky="w",
+            pady=(10, 0),
+        )
+
+        buttons = ttk.Frame(self, padding=(10, 0, 10, 6))
         buttons.grid(row=2, column=0, sticky="ew")
-        buttons.columnconfigure(6, weight=1)
+        buttons.columnconfigure(5, weight=1)
 
         self.scan_button = ttk.Button(
-            buttons, text="Scan & Preview", command=self._start_scan
+            buttons,
+            text="Scan",
+            command=self._start_scan,
         )
         self.scan_button.grid(row=0, column=0)
 
-        self.copy_button = ttk.Button(
+        self.stop_button = ttk.Button(
             buttons,
-            text="Copy Test",
-            command=self._start_copy_test,
+            text="Stop",
+            command=self._stop_scan,
             state="disabled",
         )
-        self.copy_button.grid(row=0, column=1, padx=(8, 0))
-
-        self.stop_button = ttk.Button(
-            buttons, text="Stop", command=self._stop_scan, state="disabled"
-        )
-        self.stop_button.grid(row=0, column=2, padx=(8, 0))
+        self.stop_button.grid(row=0, column=1, padx=(8, 0))
 
         ttk.Button(buttons, text="Clear Log", command=self._clear_log).grid(
-            row=0, column=3, padx=(18, 0)
+            row=0, column=2, padx=(18, 0)
         )
         ttk.Button(buttons, text="Copy Log", command=self._copy_log).grid(
-            row=0, column=4, padx=(8, 0)
+            row=0, column=3, padx=(8, 0)
         )
 
         ttk.Label(buttons, textvariable=self.summary_text).grid(
-            row=0, column=6, sticky="e"
+            row=0, column=5, sticky="e"
         )
 
         log_frame = ttk.LabelFrame(self, text="Activity log", padding=8)
-        log_frame.grid(row=3, column=0, sticky="nsew", padx=14, pady=(0, 10))
+        log_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 8))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
 
@@ -186,7 +194,7 @@ class StashApp(tk.Tk):
         self.log.grid(row=0, column=0, sticky="nsew")
         self.log.configure(state="disabled")
 
-        status = ttk.Frame(self, padding=(14, 0, 14, 10))
+        status = ttk.Frame(self, padding=(10, 0, 10, 8))
         status.grid(row=4, column=0, sticky="ew")
         status.columnconfigure(0, weight=1)
 
@@ -195,11 +203,9 @@ class StashApp(tk.Tk):
             row=1, column=0, sticky="w"
         )
 
-        self.root_path.trace_add("write", self._settings_changed)
-        self.threshold.trace_add("write", self._settings_changed)
-        self.batch_size.trace_add("write", self._settings_changed)
-        self.custom_output_prefix.trace_add("write", self._settings_changed)
-        self.output_mode.trace_add("write", self._settings_changed)
+        self.root_path.trace_add("write", self._refresh_output_example)
+        self.custom_output_prefix.trace_add("write", self._refresh_output_example)
+        self.output_mode.trace_add("write", self._refresh_output_example)
         self._update_output_controls()
 
     def _browse(self) -> None:
@@ -207,20 +213,14 @@ class StashApp(tk.Tk):
         if selected:
             self.root_path.set(selected)
 
-    def _settings_changed(self, *_args: object) -> None:
-        self._refresh_output_example()
-        if hasattr(self, "copy_button"):
-            self.copy_button.configure(state="disabled")
-        self._preview_complete = False
-
     def _update_output_controls(self) -> None:
         if self.output_mode.get() == "custom":
             self.custom_output_entry.configure(state="normal")
         else:
             self.custom_output_entry.configure(state="disabled")
-        self._settings_changed()
+        self._refresh_output_example()
 
-    def _refresh_output_example(self) -> None:
+    def _refresh_output_example(self, *_args: object) -> None:
         raw_root = self.root_path.get().strip()
         root = Path(raw_root) if raw_root else None
 
@@ -243,7 +243,7 @@ class StashApp(tk.Tk):
             raise ValueError("Enter a custom output folder name.")
         return sanitize_output_prefix(raw)
 
-    def _current_signature(self) -> tuple[str, int, int, str]:
+    def _read_settings(self) -> tuple[Path, int, int, str]:
         raw_root = self.root_path.get().strip()
         if not raw_root:
             raise ValueError("Choose a root folder first.")
@@ -262,43 +262,31 @@ class StashApp(tk.Tk):
             raise ValueError("Both numeric settings must be at least 1.")
 
         output_prefix = self._resolve_output_prefix(root)
-        return (
-            str(root.resolve()),
-            threshold,
-            batch_size,
-            output_prefix,
-        )
+        return root.resolve(), threshold, batch_size, output_prefix
 
     def _start_scan(self) -> None:
         if self._scan_thread and self._scan_thread.is_alive():
             return
-        if self._copy_thread and self._copy_thread.is_alive():
+        if self._process_thread and self._process_thread.is_alive():
             return
 
         try:
-            signature = self._current_signature()
+            root, threshold, batch_size, output_prefix = self._read_settings()
         except ValueError as exc:
             messagebox.showerror("Stash", str(exc))
             return
 
-        root = Path(signature[0])
-        threshold = signature[1]
-        batch_size = signature[2]
-        output_prefix = signature[3]
-
         self._clear_log()
         self._stop_event.clear()
         self._preview_plan.clear()
-        self._preview_signature = signature
-        self._preview_complete = False
+        self._active_root = root
 
         self.scan_button.configure(state="disabled")
-        self.copy_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
-        self.status_text.set("Scanning and building preview…")
+        self.status_text.set("Scanning…")
         self.summary_text.set("Scanning…")
 
-        self._append_log("STASH — CONSOLIDATION PREVIEW")
+        self._append_log("STASH — SCAN")
         self._append_log(f"Root: {root}")
         self._append_log(f"Match rule: folders containing 1 to {threshold} images")
         self._append_log(f"Output target: {batch_size} images")
@@ -309,7 +297,10 @@ class StashApp(tk.Tk):
         self._append_log(
             f"Existing {output_prefix}_NNN folders are excluded from source scanning."
         )
-        self._append_log("PREVIEW STAGE — no files or folders are changed.")
+        self._append_log(
+            "Delete source folders: "
+            + ("YES (safe folders only)" if self.delete_sources.get() else "NO")
+        )
         self._append_log("-" * 84)
 
         self._scan_thread = threading.Thread(
@@ -348,80 +339,106 @@ class StashApp(tk.Tk):
             )
             self._messages.put(("done", summary))
         except Exception as exc:
-            self._messages.put(("error", str(exc)))
-
-    def _start_copy_test(self) -> None:
-        if not self._preview_complete or not self._preview_plan:
-            messagebox.showinfo("Stash", "Run a complete preview first.")
-            return
-
-        try:
-            current_signature = self._current_signature()
-        except ValueError as exc:
-            messagebox.showerror("Stash", str(exc))
-            return
-
-        if current_signature != self._preview_signature:
-            self.copy_button.configure(state="disabled")
-            self._preview_complete = False
-            messagebox.showwarning(
-                "Stash",
-                "The settings changed after the preview. Run Scan & Preview again "
-                "before copying.",
-            )
-            return
-
-        root = Path(current_signature[0])
-        items = build_copy_items(root, self._preview_plan)
-
-        if not items:
-            messagebox.showinfo("Stash", "There are no matching images to copy.")
-            return
-
-        destinations = {item.destination.parent for item in items}
-        confirmed = messagebox.askyesno(
-            "Stash — Copy Test",
-            f"Copy {len(items)} image(s) into {len(destinations)} output folder(s)?\n\n"
-            "Original files and source folders will NOT be moved, renamed, or deleted.\n"
-            "Existing destination files will never be overwritten.",
-        )
-        if not confirmed:
-            return
-
-        self.scan_button.configure(state="disabled")
-        self.copy_button.configure(state="disabled")
-        self.stop_button.configure(state="disabled")
-        self.status_text.set("Copy test running…")
-
-        self._append_log("")
-        self._append_log("=" * 84)
-        self._append_log("COPY TEST")
-        self._append_log(
-            f"Copying {len(items)} image(s). Originals will remain untouched."
-        )
-        self._append_log("-" * 84)
-
-        self._copy_thread = threading.Thread(
-            target=self._copy_worker,
-            args=(items,),
-            daemon=True,
-        )
-        self._copy_thread.start()
-
-    def _copy_worker(self, items: tuple[object, ...]) -> None:
-        def report_copy(item: object) -> None:
-            self._messages.put(("copied", item))
-
-        try:
-            summary = copy_plan(items, on_copy=report_copy)
-            self._messages.put(("copy_done", summary))
-        except Exception as exc:
-            self._messages.put(("copy_error", str(exc)))
+            self._messages.put(("scan_error", str(exc)))
 
     def _stop_scan(self) -> None:
         self._stop_event.set()
         self.status_text.set("Stopping after the current folder…")
         self.stop_button.configure(state="disabled")
+
+    def _start_processing_after_scan(self, summary: ScanSummary) -> None:
+        if self._active_root is None or not self._preview_plan:
+            self._finish_idle()
+            return
+
+        groups = build_copy_groups(self._active_root, self._preview_plan)
+        files_to_copy = sum(len(group.items) for group in groups)
+        output_folders = {
+            item.destination.parent
+            for group in groups
+            for item in group.items
+        }
+        delete_requested = bool(self.delete_sources.get())
+        deletable = sum(1 for group in groups if group.safe_to_delete_source)
+        protected = len(groups) - deletable
+
+        if delete_requested:
+            cleanup_text = (
+                f"\nSource-folder deletion is ON.\n"
+                f"{deletable} source folder(s) are currently safe to delete after "
+                f"verified copying."
+            )
+            if protected:
+                cleanup_text += (
+                    f"\n{protected} source folder(s) contain extra content and will "
+                    "be left untouched."
+                )
+        else:
+            cleanup_text = "\nSource-folder deletion is OFF. Originals will remain."
+
+        confirmed = messagebox.askyesno(
+            "Stash — Confirm",
+            f"Scan complete.\n\n"
+            f"{summary.qualifying_folders} matching folder(s)\n"
+            f"{files_to_copy} image(s) will be copied\n"
+            f"{len(output_folders)} output folder(s) will be used"
+            f"{cleanup_text}\n\n"
+            "Continue?",
+        )
+
+        if not confirmed:
+            self._append_log("")
+            self._append_log("Processing cancelled. No files were changed.")
+            self.status_text.set("Scan complete — processing cancelled")
+            self._finish_idle()
+            return
+
+        self.stop_button.configure(state="disabled")
+        self.status_text.set("Copying…")
+        self._append_log("")
+        self._append_log("=" * 84)
+        self._append_log("PROCESSING")
+        self._append_log(f"Copying {files_to_copy} image(s)…")
+        if delete_requested:
+            self._append_log(
+                "Safe source folders will be removed only after verified copying."
+            )
+        else:
+            self._append_log("Original source files and folders will be kept.")
+        self._append_log("-" * 84)
+
+        self._process_thread = threading.Thread(
+            target=self._process_worker,
+            args=(groups, delete_requested),
+            daemon=True,
+        )
+        self._process_thread.start()
+
+    def _process_worker(
+        self,
+        groups: tuple[CopyGroup, ...],
+        delete_requested: bool,
+    ) -> None:
+        def report_copy(item: object) -> None:
+            self._messages.put(("copied", item))
+
+        def report_source(
+            folder: Path,
+            deleted: bool,
+            reason: str | None,
+        ) -> None:
+            self._messages.put(("source_result", (folder, deleted, reason)))
+
+        try:
+            summary = process_groups(
+                groups=groups,
+                delete_source_folders=delete_requested,
+                on_copy=report_copy,
+                on_source_result=report_source,
+            )
+            self._messages.put(("process_done", summary))
+        except Exception as exc:
+            self._messages.put(("process_error", str(exc)))
 
     def _drain_messages(self) -> None:
         try:
@@ -434,19 +451,18 @@ class StashApp(tk.Tk):
                     result, qualifies, preview = payload  # type: ignore[misc]
                     self._show_folder(result, qualifies, preview)
                 elif kind == "done":
-                    self._show_summary(payload)  # type: ignore[arg-type]
-                elif kind == "error":
-                    self._finish_scan()
-                    self.status_text.set("Scan failed")
-                    self._append_log("")
-                    self._append_log(f"ERROR: {payload}")
-                    messagebox.showerror("Stash", str(payload))
+                    self._show_scan_summary(payload)  # type: ignore[arg-type]
+                elif kind == "scan_error":
+                    self._show_scan_error(str(payload))
                 elif kind == "copied":
                     self._show_copied(payload)
-                elif kind == "copy_done":
-                    self._show_copy_done(payload)
-                elif kind == "copy_error":
-                    self._show_copy_error(str(payload))
+                elif kind == "source_result":
+                    folder, deleted, reason = payload  # type: ignore[misc]
+                    self._show_source_result(folder, deleted, reason)
+                elif kind == "process_done":
+                    self._show_process_done(payload)
+                elif kind == "process_error":
+                    self._show_process_error(str(payload))
         except queue.Empty:
             pass
         finally:
@@ -473,6 +489,17 @@ class StashApp(tk.Tk):
             self._append_log(
                 f"Next global sequence: {state.highest_sequence + 1:06d}"
             )
+
+            if state.integrity_warnings:
+                self._append_log("Output integrity: WARNING")
+                for warning in state.integrity_warnings:
+                    self._append_log(f"  - {warning}")
+                self._append_log(
+                    "Integrity warnings are informational only; Stash will not "
+                    "renumber or repair existing output automatically."
+                )
+            else:
+                self._append_log("Output integrity: OK")
 
         self._append_log("-" * 84)
 
@@ -505,7 +532,7 @@ class StashApp(tk.Tk):
                 f"             -> {item.destination_folder}\\{item.destination_name}"
             )
 
-    def _show_summary(self, summary: ScanSummary) -> None:
+    def _show_scan_summary(self, summary: ScanSummary) -> None:
         self._append_log("-" * 84)
         self._append_log(f"Folders scanned: {summary.folders_scanned}")
         self._append_log(f"Images found: {summary.images_found}")
@@ -514,31 +541,38 @@ class StashApp(tk.Tk):
 
         if summary.planned_destination_folders:
             self._append_log(
-                "Preview destinations: "
+                "Planned destinations: "
                 + ", ".join(summary.planned_destination_folders)
             )
         else:
-            self._append_log("Preview destinations: none")
+            self._append_log("Planned destinations: none")
 
         if summary.stopped:
-            self._append_log("Scan stopped by user before completion.")
-            self.status_text.set("Preview stopped")
-            self._preview_complete = False
-            self.copy_button.configure(state="disabled")
-        else:
-            self._append_log(
-                "Preview complete. No files or folders were changed during the scan."
-            )
-            self.status_text.set("Preview complete")
-            self._preview_complete = True
-            if summary.qualifying_images > 0:
-                self.copy_button.configure(state="normal")
+            self._append_log("Scan stopped by user. No files were changed.")
+            self.status_text.set("Scan stopped")
+            self._finish_idle()
+            return
 
         self.summary_text.set(
             f"{summary.qualifying_folders} matches · "
             f"{summary.qualifying_images} images"
         )
-        self._finish_scan()
+
+        if summary.qualifying_images == 0:
+            self._append_log("Scan complete. Nothing to copy.")
+            self.status_text.set("Scan complete — no matches")
+            self._finish_idle()
+            return
+
+        self.status_text.set("Scan complete — awaiting confirmation")
+        self._start_processing_after_scan(summary)
+
+    def _show_scan_error(self, message: str) -> None:
+        self._append_log("")
+        self._append_log(f"SCAN ERROR: {message}")
+        self.status_text.set("Scan failed")
+        self._finish_idle()
+        messagebox.showerror("Stash", message)
 
     def _show_copied(self, item: object) -> None:
         source = getattr(item, "source", "")
@@ -546,42 +580,58 @@ class StashApp(tk.Tk):
         self._append_log(f"[COPIED] {source}")
         self._append_log(f"         -> {destination}")
 
-    def _show_copy_done(self, summary: object) -> None:
+    def _show_source_result(
+        self,
+        folder: Path,
+        deleted: bool,
+        reason: str | None,
+    ) -> None:
+        if deleted:
+            self._append_log(f"[DELETED SOURCE FOLDER] {folder}")
+        else:
+            self._append_log(
+                f"[KEPT SOURCE FOLDER] {folder} — {reason or 'not safe to delete'}"
+            )
+
+    def _show_process_done(self, summary: object) -> None:
         files_copied = getattr(summary, "files_copied", 0)
-        folders_created = getattr(summary, "folders_created", 0)
+        output_folders_created = getattr(summary, "output_folders_created", 0)
+        source_folders_deleted = getattr(summary, "source_folders_deleted", 0)
+        source_folders_kept = getattr(summary, "source_folders_kept", 0)
 
         self._append_log("-" * 84)
-        self._append_log(f"Copy test complete: {files_copied} image(s) copied.")
-        self._append_log(f"Output folders created this run: {folders_created}")
+        self._append_log(f"Complete: {files_copied} image(s) copied.")
         self._append_log(
-            "Source files and source folders were not moved, renamed, or deleted."
+            f"Output folders created this run: {output_folders_created}"
         )
 
-        self.status_text.set("Copy test complete — originals untouched")
-        self.summary_text.set(f"{files_copied} copied · originals untouched")
-        self.scan_button.configure(state="normal")
-        self.stop_button.configure(state="disabled")
+        if self.delete_sources.get():
+            self._append_log(
+                f"Source folders deleted: {source_folders_deleted}"
+            )
+            if source_folders_kept:
+                self._append_log(
+                    f"Source folders kept for safety: {source_folders_kept}"
+                )
+        else:
+            self._append_log("Original source files and folders were kept.")
 
-        # The filesystem now differs from the preview. Require a fresh scan before
-        # another copy so numbering and output counts are recalculated safely.
-        self.copy_button.configure(state="disabled")
-        self._preview_complete = False
+        self.status_text.set("Complete")
+        self.summary_text.set(f"{files_copied} images copied")
+        self._finish_idle()
 
-    def _show_copy_error(self, message: str) -> None:
+    def _show_process_error(self, message: str) -> None:
         self._append_log("")
-        self._append_log(f"COPY TEST ERROR: {message}")
+        self._append_log(f"PROCESSING ERROR: {message}")
         self._append_log(
-            "No source files were moved or deleted. If copying had already begun "
-            "before an unexpected I/O error, successful copies are left in place."
+            "Existing destination files were never overwritten. Source folders are "
+            "only removed after all of their planned copies have verified successfully."
         )
-        self.status_text.set("Copy test stopped with an error")
-        self.scan_button.configure(state="normal")
-        self.copy_button.configure(state="disabled")
-        self.stop_button.configure(state="disabled")
-        self._preview_complete = False
-        messagebox.showerror("Stash — Copy Test", message)
+        self.status_text.set("Processing stopped with an error")
+        self._finish_idle()
+        messagebox.showerror("Stash", message)
 
-    def _finish_scan(self) -> None:
+    def _finish_idle(self) -> None:
         self.scan_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
 
