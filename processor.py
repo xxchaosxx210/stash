@@ -139,10 +139,10 @@ def process_groups(
     on_copy: Callable[[CopyItem], None] | None = None,
     on_source_result: Callable[[Path, bool, str | None], None] | None = None,
 ) -> ProcessSummary:
-    """Copy planned images and optionally remove verified, safe source folders.
+    """Copy all planned images, verify them, then optionally remove safe sources.
 
-    All destinations are checked before any writes. A source folder is only
-    deleted after every planned file in that folder has copied and verified.
+    Every destination is preflighted before writes begin. If any copy fails,
+    source deletion never starts.
     """
     checked = preflight_groups(groups)
 
@@ -151,6 +151,7 @@ def process_groups(
     source_folders_deleted = 0
     source_folders_kept = 0
 
+    # Phase 1: copy and verify the entire run.
     for group in checked:
         for item in group.items:
             destination_folder = item.destination.parent
@@ -164,53 +165,63 @@ def process_groups(
             if on_copy:
                 on_copy(item)
 
-        if not delete_source_folders:
-            continue
+    # Phase 2: only after every copy succeeded do we consider source deletion.
+    if delete_source_folders:
+        for group in checked:
+            if not group.safe_to_delete_source:
+                source_folders_kept += 1
+                if on_source_result:
+                    on_source_result(
+                        group.source_folder,
+                        False,
+                        group.delete_block_reason
+                        or "source folder was not safe to delete",
+                    )
+                continue
 
-        if not group.safe_to_delete_source:
-            source_folders_kept += 1
+            try:
+                entries = tuple(group.source_folder.iterdir())
+            except OSError as exc:
+                source_folders_kept += 1
+                if on_source_result:
+                    on_source_result(
+                        group.source_folder,
+                        False,
+                        f"could not re-check source folder: {exc}",
+                    )
+                continue
+
+            current_files = {
+                entry.resolve(strict=False)
+                for entry in entries
+                if entry.is_file()
+            }
+            planned_sources = {
+                item.source.resolve(strict=False)
+                for item in group.items
+            }
+            has_subfolders = any(entry.is_dir() for entry in entries)
+
+            if has_subfolders or current_files != planned_sources:
+                source_folders_kept += 1
+                if on_source_result:
+                    on_source_result(
+                        group.source_folder,
+                        False,
+                        "folder contents changed or extra content was found",
+                    )
+                continue
+
+            # All copies for the full run have succeeded and this folder still
+            # contains exactly the planned source files.
+            for item in group.items:
+                item.source.unlink()
+
+            group.source_folder.rmdir()
+            source_folders_deleted += 1
+
             if on_source_result:
-                on_source_result(
-                    group.source_folder,
-                    False,
-                    group.delete_block_reason or "source folder was not safe to delete",
-                )
-            continue
-
-        # Re-check immediately before deletion in case the folder changed while
-        # processing. If anything unexpected appears, leave the source untouched.
-        current_files = {
-            entry.resolve(strict=False)
-            for entry in group.source_folder.iterdir()
-            if entry.is_file()
-        }
-        planned_sources = {
-            item.source.resolve(strict=False)
-            for item in group.items
-        }
-        has_subfolders = any(
-            entry.is_dir() for entry in group.source_folder.iterdir()
-        )
-
-        if has_subfolders or current_files != planned_sources:
-            source_folders_kept += 1
-            if on_source_result:
-                on_source_result(
-                    group.source_folder,
-                    False,
-                    "folder contents changed or extra content was found",
-                )
-            continue
-
-        # Every destination in this group has already been copied and size-verified.
-        for item in group.items:
-            item.source.unlink()
-
-        group.source_folder.rmdir()
-        source_folders_deleted += 1
-
-        if on_source_result:
-            on_source_result(group.source_folder, True, None)
+                on_source_result(group.source_folder, True, None)
 
     return ProcessSummary(
         files_copied=files_copied,
