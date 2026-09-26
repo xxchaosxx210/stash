@@ -18,7 +18,6 @@ IMAGE_EXTENSIONS = {
     ".tiff",
 }
 
-MISC_FOLDER_RE = re.compile(r"^Miscellaneous_(\d+)$", re.IGNORECASE)
 GLOBAL_SEQUENCE_RE = re.compile(r"^(\d+)__")
 INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 WINDOWS_RESERVED_NAMES = {
@@ -50,6 +49,7 @@ class ExistingOutputState:
     latest_index: int
     latest_image_count: int
     highest_sequence: int
+    output_prefix: str
 
 
 @dataclass(frozen=True)
@@ -85,51 +85,62 @@ def natural_key(value: str) -> list[object]:
     ]
 
 
-def miscellaneous_index(name: str) -> int | None:
-    match = MISC_FOLDER_RE.fullmatch(name)
-    return int(match.group(1)) if match else None
-
-
-def miscellaneous_name(index: int) -> str:
-    return f"Miscellaneous_{index:03d}"
-
-
-def sanitize_folder_name(name: str) -> str:
-    """Make a source folder name safe and readable inside a Windows filename."""
+def sanitize_name(name: str, fallback: str) -> str:
+    """Return a Windows-safe readable name while preserving valid underscores."""
     cleaned = INVALID_FILENAME_RE.sub("_", name.strip())
     cleaned = re.sub(r"\s+", "_", cleaned)
     cleaned = re.sub(r"_+", "_", cleaned)
-    cleaned = cleaned.strip(" ._")
+    cleaned = cleaned.strip(" .")
 
     if not cleaned:
-        cleaned = "Folder"
+        cleaned = fallback
 
     if cleaned.upper() in WINDOWS_RESERVED_NAMES:
         cleaned += "_"
 
-    # Leave plenty of room for sequence numbers and an extension.
-    return cleaned[:120].rstrip(" ._") or "Folder"
+    return cleaned[:120].rstrip(" .") or fallback
 
 
-def inspect_existing_output(root: Path) -> ExistingOutputState:
-    """Read existing Miscellaneous_NNN folders without modifying anything."""
-    misc_folders: list[tuple[int, Path]] = []
+def sanitize_folder_name(name: str) -> str:
+    return sanitize_name(name, "Folder")
+
+
+def sanitize_output_prefix(name: str) -> str:
+    return sanitize_name(name, "Miscellaneous")
+
+
+def output_folder_index(name: str, output_prefix: str) -> int | None:
+    pattern = re.compile(
+        rf"^{re.escape(output_prefix)}_(\d+)$",
+        re.IGNORECASE,
+    )
+    match = pattern.fullmatch(name)
+    return int(match.group(1)) if match else None
+
+
+def output_folder_name(output_prefix: str, index: int) -> str:
+    return f"{output_prefix}_{index:03d}"
+
+
+def inspect_existing_output(root: Path, output_prefix: str) -> ExistingOutputState:
+    """Read existing output folders for the selected prefix without changing them."""
+    output_folders: list[tuple[int, Path]] = []
 
     for child in root.iterdir():
         if not child.is_dir():
             continue
-        index = miscellaneous_index(child.name)
+        index = output_folder_index(child.name, output_prefix)
         if index is not None:
-            misc_folders.append((index, child))
+            output_folders.append((index, child))
 
-    misc_folders.sort(key=lambda item: item[0])
+    output_folders.sort(key=lambda item: item[0])
 
     total_images = 0
     highest_sequence = 0
     latest_index = 0
     latest_image_count = 0
 
-    for index, folder in misc_folders:
+    for index, folder in output_folders:
         image_count = 0
         try:
             entries = list(folder.iterdir())
@@ -153,35 +164,45 @@ def inspect_existing_output(root: Path) -> ExistingOutputState:
             latest_image_count = image_count
 
     return ExistingOutputState(
-        folder_count=len(misc_folders),
+        folder_count=len(output_folders),
         image_count=total_images,
         latest_index=latest_index,
         latest_image_count=latest_image_count,
         highest_sequence=highest_sequence,
+        output_prefix=output_prefix,
     )
 
 
 class PreviewPlanner:
     """Calculate future destinations and names without touching the filesystem."""
 
-    def __init__(self, existing: ExistingOutputState, batch_size: int) -> None:
+    def __init__(
+        self,
+        existing: ExistingOutputState,
+        batch_size: int,
+        output_prefix: str,
+    ) -> None:
         if batch_size < 1:
-            raise ValueError("Miscellaneous target size must be at least 1.")
+            raise ValueError("Output target size must be at least 1.")
 
         self.batch_size = batch_size
+        self.output_prefix = output_prefix
         self.current_index = existing.latest_index or 1
         self.current_count = existing.latest_image_count if existing.latest_index else 0
         self.next_sequence = existing.highest_sequence + 1
         self.destination_folders: list[str] = []
 
     def plan_folder(self, result: FolderScan) -> FolderPreview:
-        # Keep an original source folder together. Once the current destination
-        # has reached the target, the next source folder starts a new batch.
+        # Keep each original source folder together. Once the current output
+        # folder has reached the target, the next source folder starts a new one.
         if self.current_count >= self.batch_size:
             self.current_index += 1
             self.current_count = 0
 
-        destination_folder = miscellaneous_name(self.current_index)
+        destination_folder = output_folder_name(
+            self.output_prefix,
+            self.current_index,
+        )
         if destination_folder not in self.destination_folders:
             self.destination_folders.append(destination_folder)
 
@@ -219,6 +240,7 @@ def scan_and_preview(
     root: Path,
     threshold: int,
     batch_size: int,
+    output_prefix: str,
     on_existing_output: Callable[[ExistingOutputState], None] | None = None,
     on_folder: Callable[[FolderScan, bool, FolderPreview | None], None] | None = None,
     stop_event: Event | None = None,
@@ -234,13 +256,15 @@ def scan_and_preview(
     if threshold < 1:
         raise ValueError("Threshold must be at least 1.")
     if batch_size < 1:
-        raise ValueError("Miscellaneous target size must be at least 1.")
+        raise ValueError("Output target size must be at least 1.")
 
-    existing = inspect_existing_output(root)
+    output_prefix = sanitize_output_prefix(output_prefix)
+    existing = inspect_existing_output(root, output_prefix)
+
     if on_existing_output:
         on_existing_output(existing)
 
-    planner = PreviewPlanner(existing, batch_size)
+    planner = PreviewPlanner(existing, batch_size, output_prefix)
 
     folders_scanned = 0
     images_found = 0
@@ -261,11 +285,19 @@ def scan_and_preview(
         current_path = Path(current_dir)
 
         if current_path == root:
-            # Stash output is never allowed back into the candidate scan.
+            # Never scan the currently selected Stash output folders as sources.
             dir_names[:] = [
-                name for name in dir_names if miscellaneous_index(name) is None
+                name
+                for name in dir_names
+                if output_folder_index(name, output_prefix) is None
             ]
-            # The root itself is the container, not a source candidate.
+            # Preserve compatibility with the original default naming scheme.
+            if output_prefix.casefold() != "miscellaneous":
+                dir_names[:] = [
+                    name
+                    for name in dir_names
+                    if output_folder_index(name, "Miscellaneous") is None
+                ]
             continue
 
         image_names = tuple(
