@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,8 +119,19 @@ def preflight_groups(groups: Iterable[CopyGroup]) -> tuple[CopyGroup, ...]:
     return checked
 
 
-def _verified_copy(source: Path, destination: Path) -> None:
-    shutil.copy2(source, destination)
+def _digest(path: Path) -> bytes:
+    with path.open("rb") as stream:
+        digest = hashlib.sha256()
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+        return digest.digest()
+
+
+def _verified_copy(source: Path, destination: Path) -> bytes:
+    # Exclusive creation also protects against files appearing after preflight.
+    with source.open("rb") as source_stream, destination.open("xb") as target:
+        shutil.copyfileobj(source_stream, target)
+    shutil.copystat(source, destination)
 
     if not destination.is_file():
         raise OSError(f"Copied file was not found at destination: {destination}")
@@ -131,6 +143,11 @@ def _verified_copy(source: Path, destination: Path) -> None:
             "Copy verification failed because file sizes differ: "
             f"{source} -> {destination}"
         )
+
+    copied_digest = _digest(destination)
+    if _digest(source) != copied_digest:
+        raise OSError(f"Copy verification failed because contents differ: {source}")
+    return copied_digest
 
 
 def process_groups(
@@ -150,6 +167,7 @@ def process_groups(
     files_copied = 0
     source_folders_deleted = 0
     source_folders_kept = 0
+    verified_digests: dict[Path, bytes] = {}
 
     # Phase 1: copy and verify the entire run.
     for group in checked:
@@ -159,7 +177,7 @@ def process_groups(
                 destination_folder.mkdir(parents=True, exist_ok=True)
                 created_output_folders.add(destination_folder)
 
-            _verified_copy(item.source, item.destination)
+            verified_digests[item.source] = _verified_copy(item.source, item.destination)
             files_copied += 1
 
             if on_copy:
@@ -209,6 +227,24 @@ def process_groups(
                         group.source_folder,
                         False,
                         "folder contents changed or extra content was found",
+                    )
+                continue
+
+            try:
+                contents_unchanged = all(
+                    _digest(item.source) == verified_digests[item.source]
+                    and _digest(item.destination) == verified_digests[item.source]
+                    for item in group.items
+                )
+            except OSError:
+                contents_unchanged = False
+
+            if not contents_unchanged:
+                source_folders_kept += 1
+                if on_source_result:
+                    on_source_result(
+                        group.source_folder, False,
+                        "source or destination contents changed or could not be verified",
                     )
                 continue
 

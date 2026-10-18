@@ -123,6 +123,22 @@ def output_folder_name(output_prefix: str, index: int) -> str:
     return f"{output_prefix}_{index:03d}"
 
 
+def _looks_like_previous_output(folder: Path) -> bool:
+    """Recognize another prefix using both its folder and provenance filenames."""
+    if not re.fullmatch(r".+_\d+", folder.name):
+        return False
+    try:
+        return any(
+            entry.is_file()
+            and entry.suffix.casefold() in IMAGE_EXTENSIONS
+            and re.fullmatch(r"\d+__.+__\d+\.[^.]+", entry.name)
+            for entry in folder.iterdir()
+        )
+    except OSError:
+        # An unreadable numbered folder cannot safely be ruled out as output.
+        return True
+
+
 def inspect_existing_output(root: Path, output_prefix: str) -> ExistingOutputState:
     """Read and lightly validate existing Stash output without changing it."""
     output_folders: list[tuple[int, Path]] = []
@@ -345,6 +361,10 @@ def scan_and_preview(
         current_path = Path(current_dir)
 
         if current_path == root:
+            dir_names[:] = [
+                name for name in dir_names
+                if not _looks_like_previous_output(root / name)
+            ]
             # Never scan the currently selected Stash output folders as sources.
             dir_names[:] = [
                 name
