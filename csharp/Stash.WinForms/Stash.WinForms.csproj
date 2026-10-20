@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>10.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <RootNamespace>Stash.WinForms</RootNamespace>
+    <AssemblyName>Stash</AssemblyName>
+    <ApplicationIcon>Assets\Stash.ico</ApplicationIcon>
+  </PropertyGroup>
+</Project>
