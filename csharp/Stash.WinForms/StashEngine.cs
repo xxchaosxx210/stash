@@ -172,12 +172,16 @@ namespace Stash.WinForms
 
         public static ExistingOutputState InspectExistingOutput(string root, string prefix)
         {
+            EnsureNoReparsePoints(root);
             var folders = new List<NumberedFolder>();
             foreach (string child in Directory.EnumerateDirectories(root))
             {
                 long? index = OutputFolderIndex(System.IO.Path.GetFileName(child), prefix);
                 if (index.HasValue)
+                {
+                    EnsureNoReparsePoints(child);
                     folders.Add(new NumberedFolder { Index = index.Value, Path = child });
+                }
             }
             folders = folders.OrderBy(item => item.Index).ToList();
 
@@ -545,6 +549,7 @@ namespace Stash.WinForms
             {
                 foreach (CopyItem item in group.Items)
                 {
+                    EnsureNoReparsePoints(item.Destination);
                     if (!File.Exists(item.Source))
                         throw new FileNotFoundException("Source file is missing: " + item.Source, item.Source);
                     string normalized = NormalizePath(item.Destination);
@@ -561,6 +566,23 @@ namespace Stash.WinForms
             using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
             using (SHA256 sha = SHA256.Create())
                 return sha.ComputeHash(stream);
+        }
+
+        private static void EnsureNoReparsePoints(string path)
+        {
+            // Check every existing ancestor: a normal-looking child can sit below a junction.
+            string current = Path.GetFullPath(path);
+            while (current != null)
+            {
+                try
+                {
+                    if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                        throw new IOException("Linked output paths are not supported: " + current);
+                }
+                catch (FileNotFoundException) { }
+                catch (DirectoryNotFoundException) { }
+                current = Path.GetDirectoryName(current);
+            }
         }
 
         private static byte[] VerifiedCopy(string source, string destination)
@@ -596,11 +618,13 @@ namespace Stash.WinForms
                 foreach (CopyItem item in group.Items)
                 {
                     string folder = Path.GetDirectoryName(item.Destination);
+                    EnsureNoReparsePoints(item.Destination);
                     if (!Directory.Exists(folder))
                     {
                         Directory.CreateDirectory(folder);
                         createdOutputFolders.Add(folder);
                     }
+                    EnsureNoReparsePoints(item.Destination);
                     verifiedDigests[item.Source] = VerifiedCopy(item.Source, item.Destination);
                     summary.FilesCopied++;
                     if (onCopy != null) onCopy(item);
@@ -648,8 +672,11 @@ namespace Stash.WinForms
                     try
                     {
                         contentsUnchanged = group.Items.All(item =>
-                            Digest(item.Source).SequenceEqual(verifiedDigests[item.Source]) &&
-                            Digest(item.Destination).SequenceEqual(verifiedDigests[item.Source]));
+                        {
+                            EnsureNoReparsePoints(item.Destination);
+                            return Digest(item.Source).SequenceEqual(verifiedDigests[item.Source]) &&
+                                Digest(item.Destination).SequenceEqual(verifiedDigests[item.Source]);
+                        });
                     }
                     catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
                     {

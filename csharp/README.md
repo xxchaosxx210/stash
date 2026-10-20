@@ -22,6 +22,7 @@ Open Stash.sln in Visual Studio 2022 and run Stash.WinForms.
 - Continues output-folder and image numbering from existing output.
 - Reports existing-output integrity warnings without repairing anything.
 - Preflights all destinations and never overwrites an existing file.
+- Rejects output paths containing Windows junctions, symbolic links or other reparse points, including linked ancestors. Checks again before copying and source cleanup.
 - Copies and verifies every image before any optional source cleanup.
 - Deletes a source folder only when it contains exactly the planned files and those files remain unchanged after copy.
 - Shows a scan preview in the activity log and asks for confirmation before copying.

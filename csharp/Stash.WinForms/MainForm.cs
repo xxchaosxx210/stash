@@ -24,6 +24,8 @@ namespace Stash.WinForms
         private readonly Label summaryLabel = new Label();
         private readonly Button scanButton = new Button();
         private readonly Button stopButton = new Button();
+        private readonly Button browse = new Button();
+        private readonly Label deleteLabel = new Label();
         private CancellationTokenSource cancellation;
         private bool busy;
 
@@ -88,7 +90,10 @@ namespace Stash.WinForms
 
             rootPath.Dock = DockStyle.Fill;
             rootPath.Margin = cellMargin;
-            var browse = new Button { Text = "Browse…", AutoSize = true, Anchor = AnchorStyles.Right, Margin = cellMargin };
+            browse.Text = "Browse…";
+            browse.AutoSize = true;
+            browse.Anchor = AnchorStyles.Right;
+            browse.Margin = cellMargin;
             browse.Click += Browse;
             table.Controls.Add(new Label { Text = "Root folder:", AutoSize = true, Anchor = AnchorStyles.Left, Margin = cellMargin }, 0, 0);
             table.Controls.Add(rootPath, 1, 0);
@@ -170,14 +175,15 @@ namespace Stash.WinForms
             deleteSources.AccessibleName = "Delete safe source folders after successful copy";
             deleteSources.AutoSize = true;
             deleteSources.Margin = new Padding(0, 4, 0, 0);
-            var deleteLabel = new Label
+            deleteLabel.Text = "Delete safe source folders after successful copy";
+            deleteLabel.AutoSize = true;
+            deleteLabel.Margin = new Padding(9, 5, 0, 0);
+            deleteLabel.Cursor = Cursors.Hand;
+            deleteLabel.Click += (sender, args) =>
             {
-                Text = "Delete safe source folders after successful copy",
-                AutoSize = true,
-                Margin = new Padding(9, 5, 0, 0),
-                Cursor = Cursors.Hand
+                if (!busy && deleteSources.Enabled)
+                    deleteSources.Checked = !deleteSources.Checked;
             };
-            deleteLabel.Click += (sender, args) => deleteSources.Checked = !deleteSources.Checked;
             var deleteRow = new FlowLayoutPanel
             {
                 AutoSize = true,
@@ -271,6 +277,7 @@ namespace Stash.WinForms
 
         private void Browse(object sender, EventArgs e)
         {
+            if (busy) return;
             using (var dialog = new FolderBrowserDialog { Description = "Choose image root folder" })
             {
                 if (dialog.ShowDialog(this) == DialogResult.OK)
@@ -286,7 +293,7 @@ namespace Stash.WinForms
             else if (ReferenceEquals(sender, customOutput) && customOutput.Checked)
                 rootOutput.Checked = false;
 
-            customPrefix.Enabled = customOutput.Checked;
+            customPrefix.Enabled = !busy && customOutput.Checked;
             RefreshOutputExample(null, EventArgs.Empty);
         }
 
@@ -313,19 +320,21 @@ namespace Stash.WinForms
                 ? StashEngine.SanitizeOutputPrefix(baseName + "_Misc")
                 : StashEngine.SanitizeOutputPrefix(customPrefix.Text);
             outputExample.Text = "Example: " + prefix + "_001, " + prefix + "_002, …";
-            customPrefix.Enabled = customOutput.Checked;
+            customPrefix.Enabled = !busy && customOutput.Checked;
         }
 
         private void SetBusy(bool value, bool scanning)
         {
             busy = value;
             rootPath.Enabled = !value;
+            browse.Enabled = !value;
             threshold.Enabled = !value;
             batchSize.Enabled = !value;
             rootOutput.Enabled = !value;
             customOutput.Enabled = !value;
             customPrefix.Enabled = !value && customOutput.Checked;
             deleteSources.Enabled = !value;
+            deleteLabel.Enabled = !value;
             scanButton.Enabled = !value;
             stopButton.Enabled = value && scanning;
         }
@@ -366,6 +375,7 @@ namespace Stash.WinForms
 
             int thresholdValue = Decimal.ToInt32(threshold.Value);
             int batchValue = Decimal.ToInt32(batchSize.Value);
+            bool deleteRequested = deleteSources.Checked;
             string prefix;
             try { prefix = GetOutputPrefix(root); }
             catch (InvalidOperationException ex)
@@ -387,7 +397,7 @@ namespace Stash.WinForms
             AppendLog("Output folder prefix: " + prefix);
             AppendLog("Rule: an original source folder is never split between output folders.");
             AppendLog("Existing " + prefix + "_NNN folders are excluded from source scanning.");
-            AppendLog("Delete source folders: " + (deleteSources.Checked ? "YES (safe folders only)" : "NO"));
+            AppendLog("Delete source folders: " + (deleteRequested ? "YES (safe folders only)" : "NO"));
             AppendLog(new string('-', 84));
 
             try
@@ -418,7 +428,6 @@ namespace Stash.WinForms
                 int outputFolderCount = groups.SelectMany(group => group.Items)
                     .Select(item => Path.GetDirectoryName(item.Destination))
                     .Distinct(StringComparer.OrdinalIgnoreCase).Count();
-                bool deleteRequested = deleteSources.Checked;
                 int deletable = groups.Count(group => group.SafeToDeleteSource);
                 int protectedCount = groups.Count - deletable;
                 string cleanupText;

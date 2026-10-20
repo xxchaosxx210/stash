@@ -3,12 +3,16 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Diagnostics;
+using System.Reflection;
+using System.Windows.Forms;
 using Stash.WinForms;
 
 namespace Stash.SafetyChecks
 {
     internal static class Program
     {
+        [STAThread]
         private static int Main()
         {
             var checks = new List<KeyValuePair<string, Action>>
@@ -22,7 +26,12 @@ namespace Stash.SafetyChecks
                 Check("source folder with extra files is kept", ExtraFilesAreKept),
                 Check("previous Stash output is excluded from scanning", PreviousOutputIsExcluded),
                 Check("ordinary numbered source folder is scanned", NumberedSourceIsIncluded),
-                Check("natural sorting, batching, and continued numbering work", SortingBatchingAndNumbering)
+                Check("natural sorting, batching, and continued numbering work", SortingBatchingAndNumbering),
+                Check("busy UI blocks cleanup, browsing, and custom input", BusyUiIsLocked),
+                Check("linked existing output is rejected during scan", LinkedOutputScanIsRejected),
+                Check("output linked after scanning is rejected before copying", LinkedOutputPreflightIsRejected),
+                Check("output linked between copies prevents cleanup", LinkedOutputDuringCopyIsRejected),
+                Check("output linked after verification keeps source", LinkedOutputPreventsCleanup)
             };
 
             int failures = 0;
@@ -48,6 +57,152 @@ namespace Stash.SafetyChecks
         private static KeyValuePair<string, Action> Check(string name, Action action)
         {
             return new KeyValuePair<string, Action>(name, action);
+        }
+
+        private static T Field<T>(MainForm form, string name) where T : Control
+        {
+            return (T)typeof(MainForm).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
+        }
+
+        private static void BusyUiIsLocked()
+        {
+            using (var form = new MainForm())
+            {
+                var custom = Field<RadioButton>(form, "customOutput");
+                var root = Field<RadioButton>(form, "rootOutput");
+                var prefix = Field<TextBox>(form, "customPrefix");
+                var path = Field<TextBox>(form, "rootPath");
+                var cleanup = Field<CheckBox>(form, "deleteSources");
+                var label = Field<Label>(form, "deleteLabel");
+                var browse = Field<Button>(form, "browse");
+                var flags = BindingFlags.Instance | BindingFlags.NonPublic;
+                var setBusy = typeof(MainForm).GetMethod("SetBusy", flags);
+                var clickLabel = typeof(Label).GetMethod("OnClick", flags);
+                custom.Checked = true;
+                Assert(!root.Checked, "Custom did not exclude root option.");
+                foreach (bool scanning in new[] { true, false })
+                {
+                    setBusy.Invoke(form, new object[] { true, scanning });
+                    Assert(!browse.Enabled && !cleanup.Enabled && !label.Enabled && !prefix.Enabled,
+                        "A settings control remained enabled while busy.");
+                    clickLabel.Invoke(label, new object[] { EventArgs.Empty });
+                    Assert(!cleanup.Checked, "Cleanup label toggled deletion while busy.");
+                    path.Text = scanning ? @"C:\TestImages" : @"C:\OtherImages";
+                    Assert(!prefix.Enabled, "Preview refresh re-enabled custom input while busy.");
+                }
+                setBusy.Invoke(form, new object[] { false, false });
+                Assert(browse.Enabled && label.Enabled && cleanup.Enabled && prefix.Enabled,
+                    "Settings were not restored after processing.");
+                clickLabel.Invoke(label, new object[] { EventArgs.Empty });
+                Assert(cleanup.Checked, "Cleanup label does not work while idle.");
+                root.Checked = true;
+                Assert(!custom.Checked && !prefix.Enabled, "Root option did not disable custom mode.");
+            }
+        }
+
+        private sealed class TestJunction : IDisposable
+        {
+            private readonly string path;
+
+            public TestJunction(string path, string target)
+            {
+                this.path = path;
+                var start = new ProcessStartInfo("cmd.exe", "/c mklink /J \"" + path + "\" \"" + target + "\"")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                using (var process = Process.Start(start))
+                {
+                    string output = process.StandardOutput.ReadToEnd();
+                    string error = process.StandardError.ReadToEnd();
+                    process.WaitForExit();
+                    Assert(process.ExitCode == 0, "Could not create test junction: " + output + error);
+                }
+            }
+
+            public void Dispose()
+            {
+                // Remove only the link before the test workspace recursively removes its files.
+                if (Directory.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                    Directory.Delete(path);
+            }
+        }
+
+        private static void LinkedOutputScanIsRejected()
+        {
+            using (var workspace = new TestWorkspace())
+            using (var outside = new TestWorkspace())
+            {
+                string source = workspace.CreateSource("A");
+                using (var junction = new TestJunction(Path.Combine(workspace.Root, "Test_Misc_001"), outside.Root))
+                {
+                    AssertThrows<IOException>(() => workspace.Plan());
+                    Assert(Directory.Exists(source), "Source changed during rejected scan.");
+                    AssertEqual(0, Directory.GetFiles(outside.Root).Length, "Scan wrote outside root.");
+                }
+            }
+        }
+
+        private static void LinkedOutputPreflightIsRejected()
+        {
+            using (var workspace = new TestWorkspace())
+            using (var outside = new TestWorkspace())
+            {
+                string source = workspace.CreateSource("A");
+                var groups = workspace.Plan();
+                using (var junction = new TestJunction(Path.GetDirectoryName(groups[0].Items[0].Destination), outside.Root))
+                {
+                    AssertThrows<IOException>(() => StashEngine.ProcessGroups(groups, true, null, null));
+                    Assert(Directory.Exists(source), "Source was deleted after blocked destination.");
+                    AssertEqual(0, Directory.GetFiles(outside.Root).Length, "Copy escaped through junction.");
+                }
+            }
+        }
+
+        private static void LinkedOutputDuringCopyIsRejected()
+        {
+            using (var workspace = new TestWorkspace())
+            using (var outside = new TestWorkspace())
+            {
+                string first = workspace.CreateSource("A");
+                string second = workspace.CreateSource("B");
+                var groups = workspace.Plan(1);
+                TestJunction junction = null;
+                try
+                {
+                    AssertThrows<IOException>(() => StashEngine.ProcessGroups(groups, true,
+                        item => junction = new TestJunction(Path.GetDirectoryName(groups[1].Items[0].Destination), outside.Root), null));
+                    Assert(Directory.Exists(first) && Directory.Exists(second), "Cleanup ran after linked-copy failure.");
+                    AssertEqual(0, Directory.GetFiles(outside.Root).Length, "Second copy escaped through junction.");
+                }
+                finally { junction?.Dispose(); }
+            }
+        }
+
+        private static void LinkedOutputPreventsCleanup()
+        {
+            using (var workspace = new TestWorkspace())
+            {
+                string source = workspace.CreateSource("A");
+                var groups = workspace.Plan();
+                TestJunction junction = null;
+                try
+                {
+                    var summary = StashEngine.ProcessGroups(groups, true, item =>
+                    {
+                        string output = Path.GetDirectoryName(item.Destination);
+                        string moved = Path.Combine(workspace.Root, "MovedOutput");
+                        Directory.Move(output, moved);
+                        junction = new TestJunction(output, moved);
+                    }, null);
+                    Assert(Directory.Exists(source), "Source deleted after destination became linked.");
+                    AssertEqual(1, summary.SourceFoldersKept, "Protected source was not reported as kept.");
+                }
+                finally { junction?.Dispose(); }
+            }
         }
 
         private sealed class TestWorkspace : IDisposable
