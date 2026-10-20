@@ -280,6 +280,12 @@ namespace Stash.WinForms
 
         private void OutputModeChanged(object sender, EventArgs e)
         {
+            // These radio buttons have different layout parents, so enforce one selection.
+            if (ReferenceEquals(sender, rootOutput) && rootOutput.Checked)
+                customOutput.Checked = false;
+            else if (ReferenceEquals(sender, customOutput) && customOutput.Checked)
+                rootOutput.Checked = false;
+
             customPrefix.Enabled = customOutput.Checked;
             RefreshOutputExample(null, EventArgs.Empty);
         }
